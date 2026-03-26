@@ -5,6 +5,9 @@ La aplicación de comandos al equipo se ampliará en pasos posteriores.
 
 from __future__ import annotations
 
+import datetime as _dt
+import os
+import re
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -21,6 +24,123 @@ VLAN_DEFAULTS: list[tuple[int, str]] = [
     (20, "VLAN_VOZ"),
     (50, "VLAN_SEGURIDAD"),
 ]
+
+SIMULATOR_HOST = "192.168.255.255"
+SIMULATOR_USER = "admin"
+SIMULATOR_PASS = "admin"
+
+
+def _normalize_vlan_name(name: str) -> str:
+    return re.sub(r"\s+", "_", name.strip())
+
+
+def _desired_vlan_map_from_rows(rows: list[dict[str, Any]]) -> dict[int, str]:
+    out: dict[int, str] = {}
+    for row in rows:
+        raw_id = str(row["var_id"].get()).strip()
+        raw_name = str(row["var_name"].get())
+        if not raw_id and not raw_name.strip():
+            continue
+        try:
+            vid = int(raw_id)
+        except ValueError:
+            raise ValueError(f"VLAN ID inválido: '{raw_id}'")
+        if vid < 1 or vid > 4094:
+            raise ValueError(f"VLAN ID fuera de rango (1-4094): {vid}")
+        name = _normalize_vlan_name(raw_name)
+        if not name:
+            raise ValueError(f"Nombre vacío para VLAN {vid}")
+        out[vid] = name
+    return out
+
+
+class SimulatedCiscoDevice:
+    def __init__(self) -> None:
+        self.hostname = "SIM_SWITCH"
+        self.vlans: dict[int, str] = {1: "default"}
+        self.saved = False
+
+    def disconnect(self) -> None:  # netmiko-like
+        return None
+
+    def send_command(self, command: str, **_: Any) -> str:  # netmiko-like
+        cmd = command.strip().lower()
+        if cmd == "show version":
+            return "Cisco IOS Software, simulated\nROM: SIM\n"
+        if cmd.startswith("show vlan"):
+            lines = [
+                "VLAN Name                             Status    Ports",
+                "---- -------------------------------- --------- -------------------------------",
+            ]
+            for vid in sorted(self.vlans):
+                lines.append(f"{vid:<4} {self.vlans[vid]:<32} active")
+            return "\n".join(lines) + "\n"
+        if cmd.startswith("show running-config") or cmd.startswith("show run"):
+            cfg = [f"hostname {self.hostname}", "!"]
+            for vid in sorted(self.vlans):
+                if vid == 1:
+                    continue
+                cfg.extend([f"vlan {vid}", f" name {self.vlans[vid]}", "!"])
+            return "\n".join(cfg) + "\n"
+        return f"% Unknown command: {command}\n"
+
+    def send_config_set(self, config_commands: list[str], **_: Any) -> str:  # netmiko-like
+        current_vlan: int | None = None
+        out: list[str] = []
+        for raw in config_commands:
+            line = raw.strip()
+            low = line.lower()
+            out.append(line)
+            m = re.fullmatch(r"hostname\s+(.+)", line, flags=re.IGNORECASE)
+            if m:
+                self.hostname = m.group(1).strip()
+                current_vlan = None
+                self.saved = False
+                continue
+            m = re.fullmatch(r"vlan\s+(\d+)", line, flags=re.IGNORECASE)
+            if m:
+                current_vlan = int(m.group(1))
+                self.vlans.setdefault(current_vlan, f"VLAN{current_vlan}")
+                self.saved = False
+                continue
+            m = re.fullmatch(r"name\s+(.+)", line, flags=re.IGNORECASE)
+            if m and current_vlan is not None:
+                self.vlans[current_vlan] = _normalize_vlan_name(m.group(1))
+                self.saved = False
+                continue
+        return "\n".join(out) + "\n"
+
+    def save_config(self, **_: Any) -> str:  # netmiko-like
+        self.saved = True
+        return "Building configuration...\n[OK]\n"
+
+
+def _build_vlan_config(desired_vlans: dict[int, str]) -> list[str]:
+    cmds: list[str] = []
+    for vid in sorted(desired_vlans):
+        cmds.append(f"vlan {vid}")
+        cmds.append(f" name {desired_vlans[vid]}")
+    return cmds
+
+
+def _parse_hostname_from_running_config(running_config: str) -> str | None:
+    m = re.search(r"(?m)^\s*hostname\s+(\S+)\s*$", running_config)
+    return m.group(1) if m else None
+
+
+def _vlan_names_present(show_vlan_brief: str) -> dict[int, str]:
+    out: dict[int, str] = {}
+    for line in show_vlan_brief.splitlines():
+        line = line.rstrip()
+        if not line or line.lower().startswith("vlan ") or line.startswith("----"):
+            continue
+        m = re.match(r"^\s*(\d+)\s+(\S+)\s+(\S+)", line)
+        if not m:
+            continue
+        vid = int(m.group(1))
+        name = m.group(2)
+        out[vid] = name
+    return out
 
 
 class CiscoAutomationApp(tk.Tk):
@@ -79,6 +199,12 @@ class CiscoAutomationApp(tk.Tk):
             btn_row, text="Desconectar", command=self._disconnect, state=tk.DISABLED
         )
         self.btn_disconnect.pack(side=tk.LEFT, padx=(8, 0))
+        self.btn_connect_sim = ttk.Button(
+            btn_row,
+            text="Conectar simulación",
+            command=self._connect_simulation_clicked,
+        )
+        self.btn_connect_sim.pack(side=tk.LEFT, padx=(8, 0))
 
         self.lbl_status = ttk.Label(conn, text="Estado: sin conexión", foreground="gray")
         self.lbl_status.grid(row=6, column=0, columnspan=2, sticky=tk.W, pady=(8, 0))
@@ -94,20 +220,36 @@ class CiscoAutomationApp(tk.Tk):
         self.entry_hostname = ttk.Entry(hf, textvariable=self.var_hostname, width=28)
         self.entry_hostname.pack(side=tk.LEFT, padx=(8, 0))
 
+        vlan_header = ttk.Frame(cfg)
+        vlan_header.pack(fill=tk.X)
+        ttk.Label(vlan_header, text="VLANs:", width=10).pack(side=tk.LEFT)
+        self.btn_add_base = ttk.Button(
+            vlan_header, text="+ Base (10/20/50)", command=self._add_base_vlans
+        )
+        self.btn_add_base.pack(side=tk.LEFT)
+        self.btn_add_vlan = ttk.Button(vlan_header, text="+ VLAN", command=self._add_vlan_row)
+        self.btn_add_vlan.pack(side=tk.LEFT, padx=(8, 0))
+
         table = ttk.Frame(cfg)
-        table.pack(fill=tk.X)
+        table.pack(fill=tk.X, pady=(6, 0))
         ttk.Label(table, text="VLAN ID", width=10).grid(row=0, column=0, sticky=tk.W)
         ttk.Label(table, text="Nombre", width=30).grid(row=0, column=1, sticky=tk.W)
 
-        self.vlan_name_vars: dict[int, tk.StringVar] = {}
-        self.vlan_entries: list[ttk.Entry] = []
-        for i, (vid, default_name) in enumerate(VLAN_DEFAULTS, start=1):
-            ttk.Label(table, text=str(vid)).grid(row=i, column=0, sticky=tk.W, pady=4)
-            var = tk.StringVar(value=default_name)
-            self.vlan_name_vars[vid] = var
-            ent = ttk.Entry(table, textvariable=var, width=32)
-            ent.grid(row=i, column=1, sticky=tk.W, pady=4)
-            self.vlan_entries.append(ent)
+        self.vlan_table = table
+        self.vlan_rows: list[dict[str, Any]] = []
+
+        actions = ttk.Frame(cfg)
+        actions.pack(fill=tk.X, pady=(12, 0))
+        self.btn_apply = ttk.Button(
+            actions, text="Aplicar (hostname + VLANs)", command=self._apply_clicked
+        )
+        self.btn_apply.pack(side=tk.LEFT)
+        self.btn_save = ttk.Button(actions, text="Guardar (NVRAM)", command=self._save_clicked)
+        self.btn_save.pack(side=tk.LEFT, padx=(8, 0))
+        self.btn_backup = ttk.Button(actions, text="Backup running-config", command=self._backup_clicked)
+        self.btn_backup.pack(side=tk.LEFT, padx=(8, 0))
+        self.btn_validate = ttk.Button(actions, text="Validar", command=self._validate_clicked)
+        self.btn_validate.pack(side=tk.LEFT, padx=(8, 0))
 
         self._set_config_widgets_state(tk.DISABLED)
 
@@ -115,7 +257,7 @@ class CiscoAutomationApp(tk.Tk):
             cfg,
             text=(
                 "Esta sección se habilita tras una conexión SSH correcta. "
-                "La aplicación de la configuración al switch se añadirá en el siguiente paso."
+                f"Tip: modo simulación con {SIMULATOR_HOST} / {SIMULATOR_USER} / {SIMULATOR_PASS}."
             ),
             foreground="gray",
             wraplength=480,
@@ -124,8 +266,16 @@ class CiscoAutomationApp(tk.Tk):
 
     def _set_config_widgets_state(self, state: str) -> None:
         self.entry_hostname.configure(state=state)
-        for ent in self.vlan_entries:
-            ent.configure(state=state)
+        self.btn_add_base.configure(state=state)
+        self.btn_add_vlan.configure(state=state)
+        for row in self.vlan_rows:
+            row["entry_id"].configure(state=state)
+            row["entry_name"].configure(state=state)
+        self.btn_apply.configure(state=state)
+        self.btn_save.configure(state=state)
+        self.btn_backup.configure(state=state)
+        self.btn_validate.configure(state=state)
+        self.btn_disconnect.configure(state=tk.NORMAL if self.device is not None else tk.DISABLED)
 
     def _connect_clicked(self) -> None:
         if self.device is not None:
@@ -152,6 +302,14 @@ class CiscoAutomationApp(tk.Tk):
 
         def worker() -> None:
             try:
+                if host == SIMULATOR_HOST:
+                    if user != SIMULATOR_USER or password != SIMULATOR_PASS:
+                        raise NetmikoAuthenticationException("Credenciales inválidas (simulación).")
+                    dev = SimulatedCiscoDevice()
+                    dev.send_command("show version")
+                    self.after(0, lambda: self._on_connect_ok(dev, simulated=True))
+                    return
+
                 dev = ConnectHandler(
                     device_type=dtype,
                     host=host,
@@ -161,7 +319,7 @@ class CiscoAutomationApp(tk.Tk):
                     conn_timeout=30,
                 )
                 dev.send_command("show version", read_timeout=60)
-                self.after(0, lambda: self._on_connect_ok(dev))
+                self.after(0, lambda: self._on_connect_ok(dev, simulated=False))
             except NetmikoTimeoutException as e:
                 self.after(0, lambda: self._on_connect_fail(f"Tiempo de espera: {e}"))
             except NetmikoAuthenticationException as e:
@@ -171,17 +329,170 @@ class CiscoAutomationApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_connect_ok(self, dev: Any) -> None:
+    def _connect_simulation_clicked(self) -> None:
+        if self.device is not None:
+            messagebox.showinfo("Conexión", "Ya hay una sesión activa. Desconecta primero.")
+            return
+        self.var_host.set(SIMULATOR_HOST)
+        self.var_port.set("22")
+        self.var_username.set(SIMULATOR_USER)
+        self.var_password.set(SIMULATOR_PASS)
+        self.var_device_type.set(DEFAULT_DEVICE_TYPE)
+        self._connect_clicked()
+
+    def _on_connect_ok(self, dev: Any, simulated: bool) -> None:
         self.device = dev
         self.btn_connect.configure(state=tk.NORMAL)
-        self.btn_disconnect.configure(state=tk.NORMAL)
-        self.lbl_status.configure(text="Estado: conectado (SSH OK)", foreground="green")
+        label = "Estado: conectado (SIMULACIÓN)" if simulated else "Estado: conectado (SSH OK)"
+        self.lbl_status.configure(text=label, foreground="green")
         self._set_config_widgets_state(tk.NORMAL)
 
     def _on_connect_fail(self, msg: str) -> None:
         self.btn_connect.configure(state=tk.NORMAL)
         self.lbl_status.configure(text="Estado: sin conexión", foreground="gray")
         messagebox.showerror("No se pudo conectar", msg)
+
+    def _apply_clicked(self) -> None:
+        if self.device is None:
+            messagebox.showerror("Sin conexión", "Primero conecta al switch.")
+            return
+
+        hostname = self.var_hostname.get().strip()
+        if not hostname:
+            messagebox.showerror("Hostname", "El hostname no puede estar vacío.")
+            return
+
+        try:
+            desired_vlans = _desired_vlan_map_from_rows(self.vlan_rows)
+        except ValueError as e:
+            messagebox.showerror("VLANs", str(e))
+            return
+        if not desired_vlans:
+            messagebox.showerror("VLANs", "Agrega al menos una VLAN (botón +).")
+            return
+
+        cmds = [f"hostname {hostname}", *_build_vlan_config(desired_vlans)]
+        self._run_device_job(
+            title="Aplicar configuración",
+            job=lambda: self.device.send_config_set(cmds),
+        )
+
+    def _save_clicked(self) -> None:
+        if self.device is None:
+            messagebox.showerror("Sin conexión", "Primero conecta al switch.")
+            return
+
+        def job() -> str:
+            if hasattr(self.device, "save_config"):
+                return self.device.save_config()
+            return self.device.send_command("copy running-config startup-config", read_timeout=120)
+
+        self._run_device_job(title="Guardar configuración", job=job)
+
+    def _backup_clicked(self) -> None:
+        if self.device is None:
+            messagebox.showerror("Sin conexión", "Primero conecta al switch.")
+            return
+
+        def job() -> str:
+            running = self.device.send_command("show running-config", read_timeout=120)
+            host = _parse_hostname_from_running_config(running) or "SWITCH"
+            ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            out_dir = os.path.join(os.getcwd(), "backups")
+            os.makedirs(out_dir, exist_ok=True)
+            path = os.path.join(out_dir, f"{host}-{ts}-running-config.txt")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(running)
+            return f"Backup guardado en:\n{path}"
+
+        self._run_device_job(title="Backup running-config", job=job)
+
+    def _validate_clicked(self) -> None:
+        if self.device is None:
+            messagebox.showerror("Sin conexión", "Primero conecta al switch.")
+            return
+
+        desired_hostname = self.var_hostname.get().strip()
+        try:
+            desired_vlans = _desired_vlan_map_from_rows(self.vlan_rows)
+        except ValueError as e:
+            messagebox.showerror("VLANs", str(e))
+            return
+
+        def job() -> str:
+            running = self.device.send_command("show running-config", read_timeout=120)
+            actual_hostname = _parse_hostname_from_running_config(running)
+            vlan_brief = self.device.send_command("show vlan brief", read_timeout=120)
+            actual_vlans = _vlan_names_present(vlan_brief)
+
+            problems: list[str] = []
+            if actual_hostname != desired_hostname:
+                problems.append(f"- Hostname esperado: {desired_hostname} | actual: {actual_hostname}")
+
+            for vid, name in desired_vlans.items():
+                actual = actual_vlans.get(vid)
+                if actual != name:
+                    problems.append(f"- VLAN {vid}: esperado '{name}' | actual '{actual}'")
+
+            if problems:
+                return "VALIDACIÓN: NO OK\n\n" + "\n".join(problems)
+            return "VALIDACIÓN: OK (hostname y VLANs coinciden)"
+
+        self._run_device_job(title="Validación", job=job, show_as_error_on_fail=True)
+
+    def _run_device_job(
+        self,
+        title: str,
+        job: callable,
+        show_as_error_on_fail: bool = False,
+    ) -> None:
+        self.btn_apply.configure(state=tk.DISABLED)
+        self.btn_save.configure(state=tk.DISABLED)
+        self.btn_backup.configure(state=tk.DISABLED)
+        self.btn_validate.configure(state=tk.DISABLED)
+
+        def worker() -> None:
+            try:
+                result = job()
+                self.after(0, lambda: messagebox.showinfo(title, str(result).strip() or "OK"))
+            except Exception as e:
+                self.after(
+                    0,
+                    lambda: messagebox.showerror(title, str(e))
+                    if show_as_error_on_fail
+                    else messagebox.showwarning(title, str(e)),
+                )
+            finally:
+                self.after(0, lambda: self._set_config_widgets_state(tk.NORMAL))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _add_vlan_row(self, vid: int | None = None, name: str = "") -> None:
+        row_index = len(self.vlan_rows) + 1  # header is row 0
+        var_id = tk.StringVar(value="" if vid is None else str(vid))
+        var_name = tk.StringVar(value=name)
+        entry_id = ttk.Entry(self.vlan_table, textvariable=var_id, width=10)
+        entry_name = ttk.Entry(self.vlan_table, textvariable=var_name, width=32)
+        entry_id.grid(row=row_index, column=0, sticky=tk.W, pady=4)
+        entry_name.grid(row=row_index, column=1, sticky=tk.W, pady=4)
+        self.vlan_rows.append(
+            {"var_id": var_id, "var_name": var_name, "entry_id": entry_id, "entry_name": entry_name}
+        )
+        # Respect current enabled/disabled state
+        if self.device is None:
+            entry_id.configure(state=tk.DISABLED)
+            entry_name.configure(state=tk.DISABLED)
+
+    def _add_base_vlans(self) -> None:
+        existing: set[int] = set()
+        for row in self.vlan_rows:
+            try:
+                existing.add(int(str(row["var_id"].get()).strip()))
+            except Exception:
+                continue
+        for vid, default_name in VLAN_DEFAULTS:
+            if vid not in existing:
+                self._add_vlan_row(vid=vid, name=default_name)
 
     def _disconnect(self) -> None:
         if self.device is not None:

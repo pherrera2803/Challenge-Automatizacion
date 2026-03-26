@@ -9,16 +9,18 @@ Proyecto de entrevista: interfaz en **Tkinter** y automatización con **Netmiko*
 
 ## Instalación
 
-```powershell
-cd Automatizacion-Switches
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
+```powershell -- correr cada comando desde la raiz del proyecto para arrancar la aplicacion
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+
 
 ## Ejecución
 
 ```powershell
+# Si usas entorno virtual:
+.\.venv\Scripts\python.exe main.py
+
+# Alternativa (si tu PATH apunta al Python correcto):
 python main.py
 ```
 
