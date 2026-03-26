@@ -6,3 +6,26 @@ Proyecto de entrevista: interfaz en **Tkinter** y automatización con **Netmiko*
 
 - Python 3.10 o superior
 - Acceso por SSH al switch (usuario con permisos de configuración)
+
+## Instalación
+
+```powershell
+cd Automatizacion-Switches
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+## Ejecución
+
+```powershell
+python main.py
+```
+
+1. **Paso 1 — Conexión:** introduce IP o FQDN, puerto SSH (22 por defecto), usuario y contraseña. Opcionalmente ajusta el tipo de dispositivo Netmiko (`cisco_ios` por defecto). Pulsa *Conectar (validar SSH)* para abrir la sesión y comprobar acceso con un `show version`.
+2. **Paso 2 — Configuración:** tras conectar, edita el hostname y los nombres de las VLANs 10, 20 y 50. La aplicación de comandos al switch, guardado en NVRAM, backup y validación se irán añadiendo por fases.
+
+## Notas
+
+- El tipo de dispositivo por defecto es `cisco_ios` (IOS/IOS-XE vía SSH).
+- Los backups y la aplicación completa de la configuración se documentarán conforme se añadan al repositorio.
