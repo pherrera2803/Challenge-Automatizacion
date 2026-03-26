@@ -234,6 +234,7 @@ class CiscoAutomationApp(tk.Tk):
         table.pack(fill=tk.X, pady=(6, 0))
         ttk.Label(table, text="VLAN ID", width=10).grid(row=0, column=0, sticky=tk.W)
         ttk.Label(table, text="Nombre", width=30).grid(row=0, column=1, sticky=tk.W)
+        ttk.Label(table, text="Acciones", width=10).grid(row=0, column=2, sticky=tk.W)
 
         self.vlan_table = table
         self.vlan_rows: list[dict[str, Any]] = []
@@ -271,6 +272,7 @@ class CiscoAutomationApp(tk.Tk):
         for row in self.vlan_rows:
             row["entry_id"].configure(state=state)
             row["entry_name"].configure(state=state)
+            row["btn_delete"].configure(state=state)
         self.btn_apply.configure(state=state)
         self.btn_save.configure(state=state)
         self.btn_backup.configure(state=state)
@@ -468,20 +470,32 @@ class CiscoAutomationApp(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _add_vlan_row(self, vid: int | None = None, name: str = "") -> None:
-        row_index = len(self.vlan_rows) + 1  # header is row 0
         var_id = tk.StringVar(value="" if vid is None else str(vid))
         var_name = tk.StringVar(value=name)
         entry_id = ttk.Entry(self.vlan_table, textvariable=var_id, width=10)
         entry_name = ttk.Entry(self.vlan_table, textvariable=var_name, width=32)
-        entry_id.grid(row=row_index, column=0, sticky=tk.W, pady=4)
-        entry_name.grid(row=row_index, column=1, sticky=tk.W, pady=4)
-        self.vlan_rows.append(
-            {"var_id": var_id, "var_name": var_name, "entry_id": entry_id, "entry_name": entry_name}
+        btn_delete = ttk.Button(
+            self.vlan_table, text="Eliminar", command=lambda: self._delete_vlan_row(row_ref)
         )
+        row_ref: dict[str, Any] = {
+            "var_id": var_id,
+            "var_name": var_name,
+            "entry_id": entry_id,
+            "entry_name": entry_name,
+            "btn_delete": btn_delete,
+        }
+        # Now that row_ref exists, we can safely set the command target
+        btn_delete.configure(command=lambda r=row_ref: self._delete_vlan_row(r))
+
+        self.vlan_rows.append(
+            row_ref
+        )
+        self._regrid_vlan_rows()
         # Respect current enabled/disabled state
         if self.device is None:
             entry_id.configure(state=tk.DISABLED)
             entry_name.configure(state=tk.DISABLED)
+            btn_delete.configure(state=tk.DISABLED)
 
     def _add_base_vlans(self) -> None:
         existing: set[int] = set()
@@ -493,6 +507,29 @@ class CiscoAutomationApp(tk.Tk):
         for vid, default_name in VLAN_DEFAULTS:
             if vid not in existing:
                 self._add_vlan_row(vid=vid, name=default_name)
+
+    def _delete_vlan_row(self, row: dict[str, Any]) -> None:
+        try:
+            row["entry_id"].destroy()
+        except Exception:
+            pass
+        try:
+            row["entry_name"].destroy()
+        except Exception:
+            pass
+        try:
+            row["btn_delete"].destroy()
+        except Exception:
+            pass
+
+        self.vlan_rows = [r for r in self.vlan_rows if r is not row]
+        self._regrid_vlan_rows()
+
+    def _regrid_vlan_rows(self) -> None:
+        for i, row in enumerate(self.vlan_rows, start=1):  # header is row 0
+            row["entry_id"].grid(row=i, column=0, sticky=tk.W, pady=4)
+            row["entry_name"].grid(row=i, column=1, sticky=tk.W, pady=4)
+            row["btn_delete"].grid(row=i, column=2, sticky=tk.W, pady=4)
 
     def _disconnect(self) -> None:
         if self.device is not None:
