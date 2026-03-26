@@ -32,6 +32,7 @@ python main.py
 
 - El tipo de dispositivo por defecto es `cisco_ios` (IOS/IOS-XE vía SSH).
 - Los backups se almacenan en la ruta backups, con el nombre del swtich y fecha
+- Backup remoto (opcional): en el frontend puedes activar **Backup remoto** y elegir **SFTP** (subida a un servidor) o **SMB/UNC** (copia a `\\servidor\share\...`).
 - Modo simulación: usa el botón **Conectar simulación** (IP `192.168.255.255`, usuario `admin`, clave `admin`) para probar sin un switch real.
 - La opción **Validar** compara la configuración deseada con la configuración actual del switch; primero ejecuta **Aplicar** (y opcionalmente **Guardar**) para que la validación sea OK.
 

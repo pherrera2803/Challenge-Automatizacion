@@ -8,11 +8,13 @@ from __future__ import annotations
 import datetime as _dt
 import os
 import re
+import shutil
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Any
 
+import paramiko
 from netmiko import ConnectHandler
 from netmiko.exceptions import NetmikoAuthenticationException, NetmikoTimeoutException
 
@@ -143,6 +145,63 @@ def _vlan_names_present(show_vlan_brief: str) -> dict[int, str]:
     return out
 
 
+def _sftp_upload_file(
+    *,
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    local_path: str,
+    remote_dir: str,
+) -> str:
+    remote_dir = remote_dir.strip() or "."
+    remote_dir = remote_dir.replace("\\", "/")
+    if remote_dir != "." and not remote_dir.startswith("/"):
+        remote_dir = "/" + remote_dir
+    remote_path = remote_dir.rstrip("/") + "/" + os.path.basename(local_path)
+
+    transport = paramiko.Transport((host, port))
+    try:
+        transport.connect(username=username, password=password)
+        sftp = paramiko.SFTPClient.from_transport(transport)
+        try:
+            # Ensure remote directory exists (best-effort)
+            if remote_dir not in (".", "/"):
+                parts = [p for p in remote_dir.split("/") if p]
+                cur = ""
+                for p in parts:
+                    cur = cur + "/" + p
+                    try:
+                        sftp.stat(cur)
+                    except IOError:
+                        try:
+                            sftp.mkdir(cur)
+                        except Exception:
+                            pass
+            sftp.put(local_path, remote_path)
+        finally:
+            try:
+                sftp.close()
+            except Exception:
+                pass
+    finally:
+        try:
+            transport.close()
+        except Exception:
+            pass
+
+    return remote_path
+
+
+def _smb_copy_file(*, local_path: str, unc_dir: str) -> str:
+    unc_dir = unc_dir.strip()
+    if not unc_dir:
+        raise ValueError("Ruta SMB/UNC vacía.")
+    dest = os.path.join(unc_dir, os.path.basename(local_path))
+    shutil.copy2(local_path, dest)
+    return dest
+
+
 class CiscoAutomationApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -252,18 +311,72 @@ class CiscoAutomationApp(tk.Tk):
         self.btn_validate = ttk.Button(actions, text="Validar", command=self._validate_clicked)
         self.btn_validate.pack(side=tk.LEFT, padx=(8, 0))
 
-        self._set_config_widgets_state(tk.DISABLED)
+        remote = ttk.LabelFrame(cfg, text="Backup remoto (opcional)", padding=10)
+        remote.pack(fill=tk.X, pady=(12, 0))
 
-        hint = ttk.Label(
-            cfg,
-            text=(
-                "Esta sección se habilita tras una conexión SSH correcta. "
-                f"Tip: modo simulación con {SIMULATOR_HOST} / {SIMULATOR_USER} / {SIMULATOR_PASS}."
-            ),
-            foreground="gray",
-            wraplength=480,
+        self.var_remote_enabled = tk.BooleanVar(value=False)
+        chk = ttk.Checkbutton(
+            remote,
+            text="Subir backup también a servidor remoto",
+            variable=self.var_remote_enabled,
+            command=self._remote_toggle_changed,
         )
-        hint.pack(anchor=tk.W, pady=(12, 0))
+        chk.grid(row=0, column=0, columnspan=4, sticky=tk.W)
+
+        self.var_remote_kind = tk.StringVar(value="sftp")
+        ttk.Radiobutton(
+            remote, text="SFTP", variable=self.var_remote_kind, value="sftp", command=self._remote_kind_changed
+        ).grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
+        ttk.Radiobutton(
+            remote, text="SMB (UNC)", variable=self.var_remote_kind, value="smb", command=self._remote_kind_changed
+        ).grid(row=1, column=1, sticky=tk.W, pady=(6, 0))
+
+        # SFTP fields
+        self.remote_sftp_frame = ttk.Frame(remote)
+        self.remote_sftp_frame.grid(row=2, column=0, columnspan=4, sticky=tk.W, pady=(8, 0))
+        ttk.Label(self.remote_sftp_frame, text="Host:").grid(row=0, column=0, sticky=tk.W)
+        self.var_sftp_host = tk.StringVar()
+        ttk.Entry(self.remote_sftp_frame, textvariable=self.var_sftp_host, width=20).grid(
+            row=0, column=1, sticky=tk.W, padx=(6, 12)
+        )
+        ttk.Label(self.remote_sftp_frame, text="Puerto:").grid(row=0, column=2, sticky=tk.W)
+        self.var_sftp_port = tk.StringVar(value="22")
+        ttk.Entry(self.remote_sftp_frame, textvariable=self.var_sftp_port, width=6).grid(
+            row=0, column=3, sticky=tk.W
+        )
+        ttk.Label(self.remote_sftp_frame, text="Usuario:").grid(row=1, column=0, sticky=tk.W, pady=(6, 0))
+        self.var_sftp_user = tk.StringVar()
+        ttk.Entry(self.remote_sftp_frame, textvariable=self.var_sftp_user, width=20).grid(
+            row=1, column=1, sticky=tk.W, padx=(6, 12), pady=(6, 0)
+        )
+        ttk.Label(self.remote_sftp_frame, text="Clave:").grid(row=1, column=2, sticky=tk.W, pady=(6, 0))
+        self.var_sftp_pass = tk.StringVar()
+        ttk.Entry(self.remote_sftp_frame, textvariable=self.var_sftp_pass, width=20, show="*").grid(
+            row=1, column=3, sticky=tk.W, pady=(6, 0)
+        )
+        ttk.Label(self.remote_sftp_frame, text="Dir remoto:").grid(row=2, column=0, sticky=tk.W, pady=(6, 0))
+        self.var_sftp_dir = tk.StringVar(value="/backups")
+        ttk.Entry(self.remote_sftp_frame, textvariable=self.var_sftp_dir, width=44).grid(
+            row=2, column=1, columnspan=3, sticky=tk.W, padx=(6, 0), pady=(6, 0)
+        )
+
+        # SMB fields
+        self.remote_smb_frame = ttk.Frame(remote)
+        self.remote_smb_frame.grid(row=3, column=0, columnspan=4, sticky=tk.W, pady=(8, 0))
+        ttk.Label(self.remote_smb_frame, text="Ruta UNC:").grid(row=0, column=0, sticky=tk.W)
+        self.var_smb_unc = tk.StringVar(value=r"\\SERVIDOR\share\backups")
+        ttk.Entry(self.remote_smb_frame, textvariable=self.var_smb_unc, width=44).grid(
+            row=0, column=1, sticky=tk.W, padx=(6, 0)
+        )
+        ttk.Label(
+            self.remote_smb_frame,
+            text="(Requiere acceso previo a la carpeta compartida en Windows)",
+            foreground="gray",
+        ).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(4, 0))
+
+        self._set_config_widgets_state(tk.DISABLED)
+        self._remote_kind_changed()
+        self._remote_toggle_changed()
 
     def _set_config_widgets_state(self, state: str) -> None:
         self.entry_hostname.configure(state=state)
@@ -278,6 +391,7 @@ class CiscoAutomationApp(tk.Tk):
         self.btn_backup.configure(state=state)
         self.btn_validate.configure(state=state)
         self.btn_disconnect.configure(state=tk.NORMAL if self.device is not None else tk.DISABLED)
+        self._remote_toggle_changed()
 
     def _connect_clicked(self) -> None:
         if self.device is not None:
@@ -405,7 +519,38 @@ class CiscoAutomationApp(tk.Tk):
             path = os.path.join(out_dir, f"{host}-{ts}-running-config.txt")
             with open(path, "w", encoding="utf-8") as f:
                 f.write(running)
-            return f"Backup guardado en:\n{path}"
+            msgs = [f"Backup local guardado en:\n{path}"]
+
+            if self.var_remote_enabled.get():
+                kind = self.var_remote_kind.get()
+                if kind == "sftp":
+                    sftp_host = self.var_sftp_host.get().strip()
+                    sftp_user = self.var_sftp_user.get().strip()
+                    sftp_pass = self.var_sftp_pass.get()
+                    sftp_dir = self.var_sftp_dir.get().strip() or "/"
+                    if not sftp_host or not sftp_user:
+                        raise ValueError("SFTP: completa host y usuario.")
+                    try:
+                        sftp_port = int(self.var_sftp_port.get().strip() or "22")
+                    except ValueError:
+                        raise ValueError("SFTP: puerto inválido.")
+                    remote_path = _sftp_upload_file(
+                        host=sftp_host,
+                        port=sftp_port,
+                        username=sftp_user,
+                        password=sftp_pass,
+                        local_path=path,
+                        remote_dir=sftp_dir,
+                    )
+                    msgs.append(f"Subido por SFTP a:\n{remote_path}")
+                elif kind == "smb":
+                    unc_dir = self.var_smb_unc.get().strip()
+                    remote_path = _smb_copy_file(local_path=path, unc_dir=unc_dir)
+                    msgs.append(f"Copiado por SMB a:\n{remote_path}")
+                else:
+                    raise ValueError(f"Tipo remoto no soportado: {kind}")
+
+            return "\n\n".join(msgs)
 
         self._run_device_job(title="Backup running-config", job=job)
 
@@ -530,6 +675,31 @@ class CiscoAutomationApp(tk.Tk):
             row["entry_id"].grid(row=i, column=0, sticky=tk.W, pady=4)
             row["entry_name"].grid(row=i, column=1, sticky=tk.W, pady=4)
             row["btn_delete"].grid(row=i, column=2, sticky=tk.W, pady=4)
+
+    def _remote_toggle_changed(self) -> None:
+        enabled = bool(self.var_remote_enabled.get()) and self.device is not None
+        for child in self.remote_sftp_frame.winfo_children():
+            if hasattr(child, "configure"):
+                try:
+                    child.configure(state=(tk.NORMAL if enabled and self.var_remote_kind.get() == "sftp" else tk.DISABLED))
+                except Exception:
+                    pass
+        for child in self.remote_smb_frame.winfo_children():
+            if hasattr(child, "configure"):
+                try:
+                    child.configure(state=(tk.NORMAL if enabled and self.var_remote_kind.get() == "smb" else tk.DISABLED))
+                except Exception:
+                    pass
+
+    def _remote_kind_changed(self) -> None:
+        kind = self.var_remote_kind.get()
+        self.remote_sftp_frame.grid_remove()
+        self.remote_smb_frame.grid_remove()
+        if kind == "sftp":
+            self.remote_sftp_frame.grid()
+        else:
+            self.remote_smb_frame.grid()
+        self._remote_toggle_changed()
 
     def _disconnect(self) -> None:
         if self.device is not None:
