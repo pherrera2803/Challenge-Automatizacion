@@ -70,6 +70,7 @@ En **Backup remoto (opcional)** puedes activar:
 1. **Paso 1 — Conexión:** introduce IP o FQDN, puerto SSH (22 por defecto), usuario y contraseña. Opcionalmente ajusta el tipo de dispositivo Netmiko (`cisco_ios` por defecto). Pulsa *Conectar (validar SSH)* para abrir la sesión y comprobar acceso con un `show version`.
 2. **Paso 2 — Configuración:** tras conectar, edita el hostname y los nombres de las VLANs 10, 20 y 50. La aplicación de comandos al switch, guardado en NVRAM, backup y validación se irán añadiendo por fases.
 
+
 ## Notas
 
 - El tipo de dispositivo por defecto es `cisco_ios` (IOS/IOS-XE vía SSH).
@@ -87,3 +88,9 @@ py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe main.py
 ```
+
+
+
+## Parte 2 (plan VPN IPSec Fortigate ↔ Palo Alto)
+
+Documentación y artefactos opcionales: [`part2/README.md`](part2/README.md).
