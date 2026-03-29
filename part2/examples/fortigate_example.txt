@@ -1,0 +1,71 @@
+# Fortigate (FortiOS) — Ejemplo conceptual (route-based) Fortigate ↔ Palo Alto
+#
+# NOTA: Esto es un ejemplo de referencia. Los comandos exactos dependen de tu FortiOS/VDOM,
+# nombres de interfaces WAN y políticas existentes.
+#
+# Parámetros ejemplo:
+# - Peer (Palo Alto) WAN: 203.0.113.2
+# - Local (Fortigate) WAN: 203.0.113.1
+# - Tunnel /30: 169.254.1.0/30
+#   - Fortigate: 169.254.1.1/30
+#   - Palo Alto: 169.254.1.2/30
+# - Local subnet (FGT): 10.10.10.0/24
+# - Remote subnet (PA): 10.20.20.0/24
+
+config vpn ipsec phase1-interface
+    edit "VPN-FGT-PA"
+        set interface "wan1"
+        set ike-version 2
+        set remote-gw 203.0.113.2
+        set psksecret <PSK_AQUI>
+        set proposal aes256-sha256
+        set dhgrp 14
+        set dpd on-idle
+        set nattraversal enable
+    next
+end
+
+config vpn ipsec phase2-interface
+    edit "VPN-FGT-PA-P2"
+        set phase1name "VPN-FGT-PA"
+        set proposal aes256-sha256
+        set pfs enable
+        set dhgrp 14
+        set src-subnet 10.10.10.0 255.255.255.0
+        set dst-subnet 10.20.20.0 255.255.255.0
+    next
+end
+
+# Tunnel interface IP (según modelo/firmware)
+config system interface
+    edit "VPN-FGT-PA"
+        set ip 169.254.1.1 255.255.255.252
+        set type tunnel
+    next
+end
+
+# Ruta hacia la red remota por el túnel
+config router static
+    edit 0
+        set dst 10.20.20.0 255.255.255.0
+        set device "VPN-FGT-PA"
+        set gateway 169.254.1.2
+    next
+end
+
+# Política ejemplo (permitir LAN → VPN)
+# Requiere que existan objetos/zonas y tu interfaz LAN real.
+# config firewall policy
+#     edit 0
+#         set name "LAN-to-PA"
+#         set srcintf "lan"
+#         set dstintf "VPN-FGT-PA"
+#         set srcaddr "10.10.10.0/24"
+#         set dstaddr "10.20.20.0/24"
+#         set action accept
+#         set schedule "always"
+#         set service "ALL"
+#         set nat disable
+#     next
+# end
+

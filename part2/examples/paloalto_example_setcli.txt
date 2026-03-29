@@ -1,0 +1,42 @@
+# Palo Alto (PAN-OS) — Ejemplo conceptual (set CLI) Fortigate ↔ Palo Alto
+#
+# NOTA: Comandos "set" son de referencia; en automatización real se recomienda API (XML/REST)
+# y commit controlado. Ajusta interfaces (ethernet1/1), zonas, VR, y nombres.
+#
+# Parámetros ejemplo:
+# - Peer (Fortigate) WAN: 203.0.113.1
+# - Local (Palo Alto) WAN: 203.0.113.2
+# - Tunnel /30: 169.254.1.0/30
+#   - Fortigate: 169.254.1.1/30
+#   - Palo Alto: 169.254.1.2/30
+# - Local subnet (PA): 10.20.20.0/24
+# - Remote subnet (FGT): 10.10.10.0/24
+
+set network ike crypto-profiles ike-crypto-profiles IKE-PROFILE authentication sha256 encryption aes-256 dh-group group14 lifetime seconds 28800
+set network ipsec crypto-profiles ipsec-crypto-profiles IPSEC-PROFILE esp authentication sha256 encryption aes-256 lifetime seconds 3600
+set network ipsec crypto-profiles ipsec-crypto-profiles IPSEC-PROFILE pfs group14
+
+set network ike gateway IKE-GW-FGT protocol ikev2 ike-crypto-profile IKE-PROFILE
+set network ike gateway IKE-GW-FGT protocol ikev2 local-address ip 203.0.113.2 interface ethernet1/1
+set network ike gateway IKE-GW-FGT peer-address ip 203.0.113.1
+set network ike gateway IKE-GW-FGT authentication pre-shared-key key <PSK_AQUI>
+set network ike gateway IKE-GW-FGT protocol ikev2 dpd enable yes interval 10 retry 3
+
+set network interface tunnel units tunnel.1 ip 169.254.1.2/30
+set network tunnel ipsec IPSEC-TUNNEL-FGT auto-key ike-gateway IKE-GW-FGT
+set network tunnel ipsec IPSEC-TUNNEL-FGT auto-key ipsec-crypto-profile IPSEC-PROFILE
+set network tunnel ipsec IPSEC-TUNNEL-FGT tunnel-interface tunnel.1
+
+# Routing (Virtual Router)
+set network virtual-router default interface tunnel.1
+set network virtual-router default routing-table ip static-route ROUTE-TO-FGT destination 10.10.10.0/24 interface tunnel.1 next-hop ip-address 169.254.1.1
+
+# Policies (zonas y objetos son ejemplo)
+# set zone VPN network layer3 tunnel.1
+# set address FGT-LAN ip-netmask 10.10.10.0/24
+# set address PA-LAN ip-netmask 10.20.20.0/24
+# set rulebase security rules PA-to-FGT from trust to VPN source PA-LAN destination FGT-LAN application any service any action allow
+# set rulebase security rules FGT-to-PA from VPN to trust source FGT-LAN destination PA-LAN application any service any action allow
+
+# commit
+
